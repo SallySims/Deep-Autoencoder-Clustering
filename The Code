@@ -1,0 +1,296 @@
+##### importing the needed packages
+
+import pandas as pd
+import numpy as np
+import os
+
+from google.colab import drive
+drive.mount('/content/drive')
+Datasav='/content/drive/My Drive/ArtificialIntelligence/Deep Learning Papers/Paper_3' ## Change to your drive or path of storage
+
+os.chdir(Datasav)
+
+#############  Loading the needed data ########### Loading the needed data #####
+
+thedata=pd.read_csv('sdn2016.csv', encoding='ISO-8859-1')### insert your data here
+thedata
+
+## Selecting the needed variables
+NewD=thedata[['sex', 'age', 'm4a', 'm5a','m6a', 'm8', 'm11', 'm12','m14', 'b5', 'b8', 'wstep2']]
+
+NewD['BPs']=round(NewD[['m4a','m5a','m6a']].mean(axis=1),2)
+
+NewD=NewD.drop(columns=['m4a', 'm5a','m6a'])
+
+NewD=NewD.rename(columns={
+    'm11':'height',
+    'm12': 'weight',
+    'm14': 'WC',
+    'b5' : 'FPG',
+    'b8' : 'TC',#(total cholesterol)
+    'pweight' : 'wstep2'
+    })
+
+NewD
+
+### Pregnancy (m8), 1 is 'Yes' 2 is 'NO'
+## filtering  out pregnant women (7722-7295)
+NewDs=NewD.query('m8!=1')
+
+NewDs=NewDs.drop(columns=['m8'])
+NewDs
+
+NewDs['age'].describe()
+
+#### Converting Anthropometrics and Biomarkers for creation of variabkes if interest
+
+NewDs['height']=NewDs['height'].apply(lambda x:np.nan if (x<50 or x>300) else x)
+NewDs['weight']=NewDs['weight'].apply(lambda x:np.nan if (x<40 or x>250) else x)
+NewDs['WC']=NewDs['WC'].apply(lambda x:np.nan if (x<40 or x>250) else x)
+NewDs['BPs']=NewDs['BPs'].apply(lambda x:np.nan if (x<50 or x>250) else x)
+NewDs['FPG']=NewDs['FPG'].apply(lambda x:np.nan if (x<1 or x>35) else x)
+NewDs['TC']=NewDs['TC'].apply(lambda x:np.nan if (x<1 or x>50) else x)
+
+##### Conversion Height from cm to m, etc
+
+NewDs['height(m)']=NewDs['height']/100
+
+
+### Creating the Derived Anthropometric indices
+NewDs['BMI']=round(NewDs['weight']/NewDs['height(m)']**2,2)
+NewDs['WhtR']=round(NewDs['weight']/NewDs['height'],2)
+NewDs['ABSI'] =NewDs['WC'] / (((NewDs['BMI'])**(2/3)) * (np.sqrt(NewDs['height']/100)))
+NewDs['BFP'] = np.where(
+    NewDs['sex'] == 'Men',
+    1.20 * NewDs['BMI'] + 0.23 * NewDs['age'] - 16.2,
+    1.20 * NewDs['BMI'] + 0.23 * NewDs['age'] - 5.4
+)
+
+NewDs
+
+##### Selecting the New Set of Variables of Interest
+
+VarNew=NewDs.drop(columns=['height',	'weight', 'height(m)'])
+VarNew
+
+
+### Changing FPG from mg/ml to mmol/l
+#### Dropping All NAs (7295-6261)
+Varno=VarNew.dropna()
+Varno
+
+######## The Deep Learning/ Deep Autoencoder Architecture ###################
+######  Deep Learning for Clustering #######
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import numpy as np
+
+# -----------------------------
+# Load your data
+df = Varno  # Replace with your actual dataframe
+
+# Make sure your survey weights are in a column named 'survey_weight'
+weights = df['wstep2'].values  # numpy array of weights
+
+# Select features
+features = ['age', 'FPG', 'TC', 'BPs', 'BMI', 'WhtR', 'ABSI', 'BFP']
+
+# Standardize features
+scaler = StandardScaler()
+X = scaler.fit_transform(df[features])
+
+# Convert to torch tensors
+X_tensor = torch.tensor(X, dtype=torch.float32)
+weights_tensor = torch.tensor(weights, dtype=torch.float32)
+
+# -----------------------------
+# Define Autoencoder with weighted loss
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, latent_dim=2):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 8),
+            nn.ReLU(),
+            nn.Linear(8, latent_dim)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 8),
+            nn.ReLU(),
+            nn.Linear(8, input_dim)
+        )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        out = self.decoder(z)
+        return out, z
+
+input_dim = X_tensor.shape[1]
+latent_dim = 3
+model = Autoencoder(input_dim, latent_dim)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
+# Weighted MSE loss function
+def weighted_mse_loss(input, target, weights):
+    mse_per_sample = ((input - target) ** 2).mean(dim=1)
+    weighted_loss = (mse_per_sample * weights).mean()
+    return weighted_loss
+
+# -----------------------------
+# Train autoencoder with weighted loss
+epochs = 300
+for epoch in range(epochs):
+    optimizer.zero_grad()
+    reconstructed, latent = model(X_tensor)
+    loss = weighted_mse_loss(reconstructed, X_tensor, weights_tensor)
+    loss.backward()
+    optimizer.step()
+    if epoch % 50 == 0:
+        print(f"Epoch {epoch} Weighted Loss: {loss.item():.4f}")
+
+# -----------------------------
+######## Extracting latent representations as numpy
+latent_np = latent.detach().numpy()
+
+# -----------------------------
+
+########### Creating the Optimal Number of Clusters 
+####### Optimum Number of Clusters #### Uisng Elbow Methods  ## (YOU CAN USE SILHOUETTE OR OTEHR METHODS)
+
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import silhouette_score # We'll adapt this for weighted context
+# from sklearn.cluster import KMeans # You can use this for comparison if you want, but we'll stick to your weighted_kmeans
+
+# Assuming you have latent_np and weights defined from your previous steps
+# For demonstration purposes, let's create some dummy data:
+# np.random.seed(42)
+# latent_np = np.random.rand(100, 10) # 100 samples, 10-dimensional latent space
+# weights = np.random.rand(100) + 0.1 # Weights for each sample, ensuring positive
+
+# Your custom weighted_kmeans implementation (provided in your query)
+def weighted_kmeans(X, weights, n_clusters=5, max_iter=100, tol=1e-4):
+    # Initialize centroids randomly from data points
+    rng = np.random.default_rng(seed=42)
+    centroids = X[rng.choice(len(X), n_clusters, replace=False)]
+
+    for i in range(max_iter):
+        # Compute distances and assign clusters
+        distances = np.linalg.norm(X[:, None, :] - centroids[None, :, :], axis=2)
+        labels = np.argmin(distances, axis=1)
+
+        # Calculate new centroids weighted by survey weights
+        new_centroids = np.zeros_like(centroids)
+        for k in range(n_clusters):
+            mask = labels == k
+            if np.any(mask):
+                new_centroids[k] = np.average(X[mask], axis=0, weights=weights[mask])
+            else:
+                # If no points assigned, keep old centroid or re-initialize
+                # For simplicity here, keep old centroid. In production, re-initializing might be better.
+                new_centroids[k] = centroids[k]
+
+        # Check for convergence
+        if np.linalg.norm(new_centroids - centroids) < tol:
+            break
+        centroids = new_centroids
+
+    return labels, centroids, centroids # Return centroids as well for WCSS calculation
+
+# --- Method 1: Elbow Method (using weighted WCSS) ---
+
+def calculate_weighted_wcss(X, labels, centroids, weights):
+    wcss = 0
+    for k in np.unique(labels):
+        mask = labels == k
+        # Calculate squared distance for points in cluster k to its centroid
+        squared_distances = np.sum((X[mask] - centroids[k])**2, axis=1)
+        # Sum these squared distances, weighted by the corresponding weights
+        wcss += np.sum(squared_distances * weights[mask])
+    return wcss
+
+wcss_values = []
+max_clusters = 10 # Define a reasonable range to test
+k_range = range(1, max_clusters + 1)
+
+print("Running Elbow Method (Weighted WCSS)...")
+for k in k_range:
+    # We need to modify weighted_kmeans to return centroids
+    # Assuming weighted_kmeans returns labels, centroids
+    labels, current_centroids, _ = weighted_kmeans(latent_np, weights, n_clusters=k)
+    wcss = calculate_weighted_wcss(latent_np, labels, current_centroids, weights)
+    wcss_values.append(wcss)
+    print(f"K={k}, WCSS={wcss:.2f}")
+
+plt.figure(figsize=(10, 6))
+plt.plot(k_range, wcss_values, marker='o')
+plt.title('Elbow Method for Optimal K (Weighted KMeans)')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Weighted Within-Cluster Sum of Squares (WCSS)')
+plt.xticks(k_range)
+plt.grid(True)
+plt.show()
+
+print("\nInterpret the Elbow Plot: Look for the 'elbow' where the decrease in WCSS slows down significantly.")
+
+################### Creating the Cutome Kmeans########
+
+# Custom weighted KMeans implementation
+def weighted_kmeans(X, weights, n_clusters=5, max_iter=100, tol=1e-4):
+    # Initialize centroids randomly from data points
+    rng = np.random.default_rng(seed=42)
+    centroids = X[rng.choice(len(X), n_clusters, replace=False)]
+
+    for i in range(max_iter):
+        # Compute distances and assign clusters
+        distances = np.linalg.norm(X[:, None, :] - centroids[None, :, :], axis=2)
+        labels = np.argmin(distances, axis=1)
+
+        # Calculate new centroids weighted by survey weights
+        new_centroids = np.zeros_like(centroids)
+        for k in range(n_clusters):
+            mask = labels == k
+            if np.any(mask):
+                new_centroids[k] = np.average(X[mask], axis=0, weights=weights[mask])
+            else:
+                # If no points assigned, keep old centroid
+                new_centroids[k] = centroids[k]
+
+        # Check for convergence
+        if np.linalg.norm(new_centroids - centroids) < tol:
+            break
+        centroids = new_centroids
+
+    return labels, centroids
+
+labels, centroids = weighted_kmeans(latent_np, weights, n_clusters=5)
+df['Cluster'] = labels
+
+##### Printing the cluster Summary
+print(df.groupby('Cluster')[features].mean())
+
+###### Creating the 3D Plot  ###########
+########### This is the 3d Plot
+from sklearn.metrics import silhouette_score
+score = silhouette_score(latent_np, labels)
+print(f"Silhouette Score: {score}")
+
+from mpl_toolkits.mplot3d import Axes3D
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection='3d')
+scatter = ax.scatter(latent_np[:,0], latent_np[:,1], latent_np[:,2], c=df['Cluster'], cmap='viridis')
+ax.set_title('Clusters in 3D Latent Space (Weighted)')
+ax.set_xlabel('Latent Dimension 1')
+ax.set_ylabel('Latent Dimension 2')
+ax.set_zlabel('Latent Dimension 3')
+plt.colorbar(scatter, label='Cluster')
+plt.show()
+
+print(df.groupby('Cluster')[features].mean())
+
+
+
